@@ -13,11 +13,11 @@ import os
 import random
 import re
 import sys
-
-import torch
-
-import logging
 import time
+import io
+import traceback
+import wave
+import torch
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -52,6 +52,8 @@ from TTS_infer_pack.TTS import NO_PROMPT_ERROR, TTS, TTS_Config
 
 from tools.assets import css, js, top_html
 from tools.i18n.i18n import I18nAuto, scan_language_list
+import numpy as np
+from fastapi.responses import StreamingResponse
 
 language = os.environ.get("language", "Auto")
 language = sys.argv[-1] if sys.argv[-1] in scan_language_list() else language
@@ -159,7 +161,6 @@ def inference(
     sample_steps,
     super_sampling,
 ):
-
     seed = -1 if keep_random else seed
     actual_seed = seed if seed not in [-1, "", None] else random.randint(0, 2**32 - 1)
     inputs = {
@@ -185,20 +186,13 @@ def inference(
         "super_sampling": super_sampling,
     }
 
-
     logging.info(
         f"inference_button请求耗时: {inputs}"
     )
+
     try:
-
-        start_time = time.time()
-
         for item in tts_pipeline.run(inputs):
             yield item, actual_seed
-
-        logging.info(
-            f"TTS请求耗时: {time.time() - start_time:.3f}s | 文本: {text}"
-        )
     except NO_PROMPT_ERROR:
         gr.Warning(i18n("V3不支持无参考文本模式，请填写参考文本！"))
 
@@ -435,7 +429,6 @@ with gr.Blocks(title="GPT-SoVITS WebUI", analytics_enabled=False, js=js, css=css
                     inference_button = gr.Button(i18n("合成语音"), variant="primary")
                     stop_infer = gr.Button(i18n("终止合成"), variant="primary")
 
-
         inference_button.click(
             inference,
             [
@@ -516,11 +509,168 @@ with gr.Blocks(title="GPT-SoVITS WebUI", analytics_enabled=False, js=js, css=css
             cut_text.click(to_cut, [text_inp, _how_to_cut], [text_opt])
         gr.Markdown(value=i18n("后续将支持转音素、手工修改音素、语音合成分步执行。"))
 
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import FileResponse
+import tempfile
+import shutil
+import os
+from pydantic import BaseModel
+
+app = FastAPI()
+
+
+class InferenceRequest(BaseModel):
+    text: str
+    text_lang: str = "中文"
+    ref_audio: str   # 这里是base64编码的音频文件内容
+    prompt_text: str = ""
+    prompt_lang: str = "中文"
+    top_k: int = 5
+    top_p: float = 1
+    temperature: float = 1
+    text_split_method: str = "按标点符号切"
+    batch_size: int = 20
+    speed_factor: float = 1.1
+    ref_text_free: bool = True
+    split_bucket: bool = True
+    fragment_interval: float = 0.3
+    seed: int = -1
+    keep_random: bool = True
+    parallel_infer: bool = True
+    repetition_penalty: float = 1.35
+    sample_steps: int = 32
+    super_sampling: bool = False
+
+@app.post("/tts")
+async def api_inference(req: InferenceRequest):
+
+    try:
+        start_time = time.time()
+        result = inference(
+            text=req.text,
+            text_lang=req.text_lang,
+            ref_audio_path=req.ref_audio,
+            aux_ref_audio_paths=None,
+            prompt_text=req.prompt_text,
+            prompt_lang=req.prompt_lang,
+            top_k=req.top_k,
+            top_p=req.top_p,
+            temperature=req.temperature,
+            text_split_method=req.text_split_method,
+            batch_size=req.batch_size,
+            speed_factor=req.speed_factor,
+            ref_text_free=req.ref_text_free,
+            split_bucket=req.split_bucket,
+            fragment_interval=req.fragment_interval,
+            seed=req.seed,
+            keep_random=req.keep_random,
+            parallel_infer=req.parallel_infer,
+            repetition_penalty=req.repetition_penalty,
+            sample_steps=req.sample_steps,
+            super_sampling=req.super_sampling,
+        )
+
+        logging.info(
+            f"TTS请求infer   ence耗时: {time.time() - start_time:.3f}s | 文本: {req.text}"
+        )
+        for wav_data, _ in result:
+            sr, audio = wav_data
+            # 确保音频数据为16位整数格式
+            if not isinstance(audio, np.ndarray):
+                audio = np.array(audio)
+            if audio.dtype != np.int16:
+                audio = (audio * 32768).astype(np.int16)
+
+            # 创建临时WAV文件
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
+                temp_path = temp_wav.name
+                # 写入WAV格式
+                import wave
+                import struct
+                with wave.open(temp_path, "wb") as wav_file:
+                    wav_file.setnchannels(1)  # 单声道
+                    wav_file.setsampwidth(2)  # 16位
+                    wav_file.setframerate(sr)
+                    wav_file.writeframes(audio.tobytes())
+            logging.info(
+                f"TTS请求耗时: {time.time() - start_time:.3f}s | 文本: {req.text}"
+            )
+            # 返回WAV文件
+            return FileResponse(
+                temp_path,
+                media_type="audio/wav",
+                headers={
+                    "Content-Disposition": "attachment;filename=output.wav"
+                }
+            )
+
+    except Exception as e:
+
+        traceback.print_exc()
+        logging.error(f"Error during inference: {e}")
+        # 返回错误信息
+        return {"error": "未能生成音频"}
+
+
+def wav_chunk_streamer(infer_gen):
+    def encode_wav_chunk(sr, audio):
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sr)
+            wav_file.writeframes(audio.tobytes())
+        return buffer.getvalue()
+
+    for wav_data, _ in infer_gen:
+        sr, audio = wav_data
+        if not isinstance(audio, np.ndarray):
+            audio = np.array(audio)
+        if audio.dtype != np.int16:
+            audio = (audio * 32768).astype(np.int16)
+        yield encode_wav_chunk(sr, audio)  # 每段 WAV 数据
+
+@app.post("/tts_stream")
+async def api_inference(req: InferenceRequest):
+    try:
+        infer_gen = inference(
+            text=req.text,
+            text_lang=req.text_lang,
+            ref_audio_path=req.ref_audio,
+            aux_ref_audio_paths=[],
+            prompt_text=req.prompt_text,
+            prompt_lang=req.prompt_lang,
+            top_k=req.top_k,
+            top_p=req.top_p,
+            temperature=req.temperature,
+            text_split_method=req.text_split_method,
+            batch_size=req.batch_size,
+            speed_factor=req.speed_factor,
+            ref_text_free=req.ref_text_free,
+            split_bucket=req.split_bucket,
+            fragment_interval=req.fragment_interval,
+            seed=req.seed,
+            keep_random=req.keep_random,
+            parallel_infer=req.parallel_infer,
+            repetition_penalty=req.repetition_penalty,
+            sample_steps=req.sample_steps,
+            super_sampling=req.super_sampling,
+        )
+
+        return StreamingResponse(
+            wav_chunk_streamer(infer_gen),
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": "inline; filename=output.wav"
+            }
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"error": f"生成失败: {str(e)}"}
+
+
 if __name__ == "__main__":
-    app.queue().launch(  # concurrency_count=511, max_size=1022
-        server_name="0.0.0.0",
-        inbrowser=True,
-        share=is_share,
-        server_port=infer_ttswebui,
-        # quiet=True,
-    )
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8001)
