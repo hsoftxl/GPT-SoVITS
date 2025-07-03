@@ -18,6 +18,8 @@ import io
 import traceback
 import wave
 import torch
+import numpy as np
+from fastapi.responses import StreamingResponse
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -52,8 +54,6 @@ from TTS_infer_pack.TTS import NO_PROMPT_ERROR, TTS, TTS_Config
 
 from tools.assets import css, js, top_html
 from tools.i18n.i18n import I18nAuto, scan_language_list
-import numpy as np
-from fastapi.responses import StreamingResponse
 
 language = os.environ.get("language", "Auto")
 language = sys.argv[-1] if sys.argv[-1] in scan_language_list() else language
@@ -161,6 +161,7 @@ def inference(
     sample_steps,
     super_sampling,
 ):
+
     seed = -1 if keep_random else seed
     actual_seed = seed if seed not in [-1, "", None] else random.randint(0, 2**32 - 1)
     inputs = {
@@ -186,13 +187,20 @@ def inference(
         "super_sampling": super_sampling,
     }
 
+
     logging.info(
         f"inference_button请求耗时: {inputs}"
     )
-
     try:
+
+        start_time = time.time()
+
         for item in tts_pipeline.run(inputs):
             yield item, actual_seed
+
+        logging.info(
+            f"TTS请求耗时: {time.time() - start_time:.3f}s | 文本: {text}"
+        )
     except NO_PROMPT_ERROR:
         gr.Warning(i18n("V3不支持无参考文本模式，请填写参考文本！"))
 
@@ -429,6 +437,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", analytics_enabled=False, js=js, css=css
                     inference_button = gr.Button(i18n("合成语音"), variant="primary")
                     stop_infer = gr.Button(i18n("终止合成"), variant="primary")
 
+
         inference_button.click(
             inference,
             [
@@ -508,6 +517,7 @@ with gr.Blocks(title="GPT-SoVITS WebUI", analytics_enabled=False, js=js, css=css
             text_opt = gr.Textbox(label=i18n("切分后文本"), value="", lines=4)
             cut_text.click(to_cut, [text_inp, _how_to_cut], [text_opt])
         gr.Markdown(value=i18n("后续将支持转音素、手工修改音素、语音合成分步执行。"))
+
 
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import FileResponse
