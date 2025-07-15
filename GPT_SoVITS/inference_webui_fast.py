@@ -31,6 +31,11 @@ import torch
 
 import logging
 import time
+import numpy
+
+# 在文件开头添加输出目录配置
+output_dir = os.environ.get("output_dir", "outputs")
+os.makedirs(output_dir, exist_ok=True)
 
 now_dir = os.getcwd()
 sys.path.append(now_dir)
@@ -206,8 +211,19 @@ def inference(
 
         start_time = time.time()
 
-        for item in tts_pipeline.run(inputs):
-            yield item, actual_seed
+        for audio in tts_pipeline.run(inputs):
+            if isinstance(audio, tuple):
+                # 保存到本地
+                output_filename = f"tts_{int(time.time())}.wav"
+                output_path = os.path.join(output_dir, output_filename)
+                audio_data = audio[0] if isinstance(audio[0], numpy.ndarray) else audio[1]
+                import soundfile as sf
+                sf.write(output_path, audio_data, 32000)
+                logging.info(f"音频已保存至: {output_path}")
+                # 返回原始音频数据给 Gradio
+                yield audio, actual_seed
+            else:
+                yield audio, actual_seed
 
         logging.info(
             f"TTS请求耗时: {time.time() - start_time:.3f}s | 文本: {text}"

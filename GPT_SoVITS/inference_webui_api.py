@@ -525,29 +525,30 @@ import tempfile
 import shutil
 import os
 from pydantic import BaseModel
+import soundfile as sf
 
 app = FastAPI()
 
 
 class InferenceRequest(BaseModel):
     text: str
-    text_lang: str = "中文"
+    text_lang: str = i18n("中文")
     ref_audio: str   # 这里是base64编码的音频文件内容
-    prompt_text: str = ""
-    prompt_lang: str = "中文"
-    top_k: int = 5
-    top_p: float = 1
-    temperature: float = 1
-    text_split_method: str = "按标点符号切"
+    prompt_text: str
+    prompt_lang: str = i18n("中文")
+    top_k: int = 6
+    top_p: float = 0.9
+    temperature: float = 0.95
+    text_split_method: str = i18n("按标点符号切")
     batch_size: int = 20
     speed_factor: float = 1.1
-    ref_text_free: bool = True
+    ref_text_free: bool = False
     split_bucket: bool = True
     fragment_interval: float = 0.3
     seed: int = -1
     keep_random: bool = True
     parallel_infer: bool = True
-    repetition_penalty: float = 1.35
+    repetition_penalty: float = 1.45
     sample_steps: int = 32
     super_sampling: bool = False
 
@@ -632,24 +633,21 @@ def wav_chunk_streamer(infer_gen):
             wav_file.writeframes(audio.tobytes())
         return buffer.getvalue()
 
-    for wav_data, _ in infer_gen:
-        sr, audio = wav_data
-        if not isinstance(audio, np.ndarray):
-            audio = np.array(audio)
-        if audio.dtype != np.int16:
-            audio = (audio * 32768).astype(np.int16)
-        yield encode_wav_chunk(sr, audio)  # 每段 WAV 数据
+    for audio, _ in infer_gen:
+        audio_data = audio[0] if isinstance(audio[0], np.ndarray) else audio[1]
+        yield encode_wav_chunk(32000, audio_data)  # 每段 WAV 数据
+
 
 @app.post("/tts_stream")
 async def api_inference(req: InferenceRequest):
     try:
         infer_gen = inference(
             text=req.text,
-            text_lang=req.text_lang,
+            text_lang=i18n(req.text_lang),
             ref_audio_path=req.ref_audio,
             aux_ref_audio_paths=[],
             prompt_text=req.prompt_text,
-            prompt_lang=req.prompt_lang,
+            prompt_lang=i18n(req.prompt_lang),
             top_k=req.top_k,
             top_p=req.top_p,
             temperature=req.temperature,
@@ -683,4 +681,5 @@ async def api_inference(req: InferenceRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    port = int(os.environ.get("PORT", 8001))  # 默认端口8001
+    uvicorn.run(app, host="0.0.0.0", port=port)
