@@ -20,6 +20,8 @@ cp config.py "$DEST_DIR/"
 cp webui.py "$DEST_DIR/"
 cp -r ref_audio "$DEST_DIR/"
 cp requirements.txt "$DEST_DIR/"
+cp install.sh "$DEST_DIR/"
+cp extra-req.txt "$DEST_DIR/"
 
 echo "复制文件结束..."
 # 创建压缩包
